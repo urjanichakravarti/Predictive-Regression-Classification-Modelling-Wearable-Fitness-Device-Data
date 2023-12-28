@@ -1,0 +1,780 @@
+---
+title: "Wearable Device Modelling Project"
+output:
+  html_document: default
+  word_document: default
+date: "2023-11-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(stats)
+library(glmnet)
+library(randomForest)
+library(caret)
+library(gbm)
+library(e1071)
+library(caret)
+library(randomForest)
+library(boot)
+library(reshape2)
+
+
+```
+
+```{r}
+set.seed(1)
+```
+
+## Exploratory Data Analysis
+```{r}
+file_path <- "C:\\Users\\Urjani Chakravarti\\Documents\\UT Austin\\Semester 1\\Intro to ML\\Project\\Final Project Results and Code\\aw_fb_data.csv"
+
+# Check file permissions
+file_permission <- file.access(file_path)
+
+if (file_permission == 0) {
+  print("No access to the file.")
+} else if (file_permission == 1) {
+  print("File can be executed.")
+} else if (file_permission == 2) {
+  print("File can be written.")
+} else if (file_permission == 4) {
+  print("File can be read.")
+} else {
+  print("Unknown permission status.")
+}
+```
+
+```{r}
+aw_fb_data <- read.csv("C:\\Users\\Urjani Chakravarti\\Documents\\UT Austin\\Semester 1\\Intro to ML\\Project\\Final Project Results and Code\\aw_fb_data.csv")
+head(aw_fb_data)
+summary(aw_fb_data)
+names(aw_fb_data)
+
+
+#Cleaning the data
+columns_to_drop <- c("X1", "X", "device", "entropy_heart", "entropy_setps", "corr_heart_steps", "norm_heart", "sd_norm_heart")
+aw_fb_data <- aw_fb_data[, !(names(aw_fb_data) %in% columns_to_drop)]
+colnames(aw_fb_data)[colnames(aw_fb_data) == "hear_rate"] <- "heart_rate"
+```
+
+## Including Plots
+
+```{r}
+
+
+# Basic scatter plot to visualize the relationship between 'steps' and 'calories'
+ggplot(aw_fb_data, aes(x = steps, y = calories)) + geom_point() + labs(title = "Scatter Plot of Steps vs. Calories", x = "Steps", y = "Calories")
+
+# Barplot for Activity Distribution
+ggplot(aw_fb_data, aes(x = activity)) +
+  geom_bar() +
+  labs(title = "Distribution of Activities", x = "Activity", y = "Count")
+
+# Boxplot to compare calories across different activities
+ggplot(aw_fb_data, aes(x = activity, y = calories)) + geom_boxplot() + labs(title = "Boxplot of Calories by Activity", x = "Activity", y = "Calories")
+
+# Selecting numerical variables for correlation heatmap
+cor_variables <- c("age", "gender", "height", "weight", "steps", "heart_rate", "calories", "distance", "resting_heart", "intensity_karvonen", "steps_times_distance")
+
+# Reshape the data for the correlation heatmap
+cor_matrix <- cor(aw_fb_data[, cor_variables])
+cor_matrix_long <- as.data.frame(as.table(cor_matrix))
+colnames(cor_matrix_long) <- c("Var1", "Var2", "Correlation")
+
+# Plot the correlation heatmap
+library(ggplot2)
+ggplot(data = cor_matrix_long, aes(x = Var1, y = Var2, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Correlation Heatmap")
+
+```
+
+```{r}
+### cleaning the data
+columns_to_drop <- c("activity")
+aw_fb_data_reg <- aw_fb_data[, !(names(aw_fb_data) %in% columns_to_drop)]
+
+### checking for null values
+any_na_values <- any(is.na(aw_fb_data_reg))
+print(any_na_values)
+```
+## Principal Component Analysis
+
+
+```{r}
+# Remove constant columns
+constant_cols <- sapply(aw_fb_data, function(x) length(unique(x))) == 1
+data_pca <- aw_fb_data[, !constant_cols]
+
+# Handle missing values (imputation or removal)
+# For imputation, you can use packages like 'mice', 'missForest', or 'imputeTS'
+# Perform appropriate handling of missing values in 'data_pca'
+
+# Perform PCA after handling missing values and removing constant columns
+pca_result <- prcomp(data_pca[, -which(names(data_pca) == "activity")], scale. = TRUE, center = TRUE)
+
+# Accessing loadings and scores
+loadings <- pca_result$rotation # Loadings
+scores <- pca_result$x # Scores
+
+# Calculate proportion of variance explained by each PC
+prop_var <- (pca_result$sdev^2) / sum(pca_result$sdev^2)
+
+# Create a cumulative proportion of variance explained
+cumulative_prop_var <- cumsum(prop_var)
+
+# Plotting variance explained by each principal component
+plot(prop_var, type = 'b', xlab = "Principal Component", ylab = "Proportion of Variance Explained",
+     main = "Variance Explained by Principal Components")
+
+# Plotting cumulative proportion of variance explained
+plot(cumulative_prop_var, type = 'b', xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained",
+     main = "Cumulative Variance Explained by Principal Components")
+
+# Accessing specific components (e.g., PC1 and PC2)
+pc1 <- scores[, 1] # PC1 scores
+pc2 <- scores[, 2] # PC2 scores
+
+# Create a data frame with PC1, PC2, and activity labels
+pc_df <- data.frame(PC1 = pc1, PC2 = pc2, Activity = data_pca$activity)
+
+# Plotting PC1 vs PC2 and coloring points by 'activity' with class labels highlighted
+library(ggplot2)
+
+ggplot(pc_df, aes(x = PC1, y = PC2, color = Activity)) +
+  geom_point() +
+  labs(x = "PC1", y = "PC2", title = "Principal Component Plot with Activity Classes")
+
+
+```
+```{r}
+# split into test and train
+index <- sample(1:nrow(aw_fb_data_reg), 0.7 * nrow(aw_fb_data_reg))
+
+train_data <- aw_fb_data_reg[index, ]
+test_data <- aw_fb_data_reg[-index, ]
+```
+
+
+# 1. Regression
+
+## Multiple Linear Regression 
+
+```{r}
+# Number of folds for cross-validation
+num_folds <- 5
+
+# Create indices for cross-validation
+cv_indices <- sample(1:num_folds, size = nrow(train_data), replace = TRUE)
+
+# Define the model formula
+formula <- calories ~ age + gender + height + weight + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance
+
+# Perform cross-validation using cv.glm()
+cv_results <- cv.glm(train_data, glm(formula, data = train_data), K = num_folds)
+cv_mse <- cv_results$delta  # Extract MSE values from cross-validation
+
+# Average MSE across folds
+average_cv_mse <- mean(cv_mse)
+cat("Average Cross-Validated MSE:", average_cv_mse, "\n")
+
+# Fit the model on the entire training set
+final_lm.fit <- glm(formula, data = train_data)
+
+# Make predictions on the test set
+test_predictions <- predict(final_lm.fit, newdata = test_data)
+
+# Calculate test accuracy
+test_accuracy <- mean((test_data$calories - test_predictions)^2)
+cat("Test Accuracy (MSE) on Test Data:", test_accuracy, "\n")
+
+# Summary of the final model
+summary(final_lm.fit)
+
+# Plot diagnostics for the final model
+plot(final_lm.fit)
+```
+
+**Observation:** The variables gender, weight, steps, heart_rate, distance, resting_heart and intensity_karvonen are statistically significant with lesser p-value. The test MSE is equal to 623.4567 which is considerably large, indicating that the model does not accurately fit the data. The graphs suggest heteroscedasticity (unequal variance of residuals), indicating that the model is not a good fit. Clearly, there exists non-linearity in the data.  
+
+```{r}
+# introducing non-linear terms
+
+# Add age_squared and weight_squared columns to train_data
+train_data$age_squared <- train_data$age^2
+train_data$weight_squared <- train_data$weight^2
+test_data$age_squared <- test_data$age^2
+test_data$weight_squared <- test_data$weight^2
+
+
+# Number of folds for cross-validation
+num_folds <- 5
+
+# Create indices for cross-validation
+cv_indices <- sample(1:num_folds, size = nrow(train_data), replace = TRUE)
+
+# Initialize a vector to store cross-validated MSE values
+cv_mse <- numeric(num_folds)
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Extract training and validation sets for the current fold
+  train_data_cv <- train_data[cv_indices != fold, ]
+  validation_data_cv <- train_data[cv_indices == fold, ]
+  
+  # Define the model formula
+  formula <- calories ~ age + age_squared + gender + height + weight + weight_squared + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance
+  
+  # Fit the model on the training set with nonlinear terms
+  lm.fit_cv <- glm(formula, data = train_data_cv)
+  
+  # Make predictions on the validation set
+  predictions <- predict(lm.fit_cv, newdata = validation_data_cv)
+  
+  # Calculate MSE for the current fold
+  cv_mse[fold] <- mean((validation_data_cv$calories - predictions)^2)
+}
+
+# Average MSE across folds
+average_cv_mse <- mean(cv_mse)
+cat("Average Cross-Validated MSE with Nonlinear Terms:", average_cv_mse, "\n")
+
+# Fit the model on the entire training set with nonlinear terms
+final_lm_fit <- glm(calories ~ age + age_squared + gender + height + weight + weight_squared + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance, data = train_data)
+
+# Make predictions on the test set
+# Remove quadratic terms from both train_data and test_data before making predictions
+train_data$age_squared <- NULL
+train_data$weight_squared <- NULL
+
+test_predictions <- predict(final_lm_fit, newdata = test_data)
+
+test_data$age_squared <- NULL
+test_data$weight_squared <- NULL
+
+# Calculate test accuracy (MSE)
+test_accuracy <- mean((test_data$calories - test_predictions)^2)
+cat("Test Accuracy (MSE) on Test Data:", test_accuracy, "\n")
+
+# Summary of the final model
+summary(final_lm_fit)
+
+# Plot diagnostics for the final model
+plot(final_lm_fit)
+```
+
+**Observation:** Upon adding non-linear terms, the performance of the model did not improve. The MSE is 623.4117, indicating a poor fit. Additionally, the graphs do not show any indication of homoscedasticity.
+
+
+## Ridge Regression
+
+```{r}
+
+# Extract predictor variables and response variable from the training data
+train_data <- train_data[, !colnames(train_data) %in% c("age_squared", "weight_squared")]
+X <- as.matrix(train_data[, -which(colnames(train_data) %in% "calories")])
+y <- train_data$calories
+
+# Standardize the predictor variables
+X_standardized <- scale(X)
+
+# Perform cross-validated ridge regression
+cv_ridge_model <- cv.glmnet(X_standardized, y, alpha = 0)
+
+# Optimal lambda from cross-validated ridge model
+optimal_lambda <- cv_ridge_model$lambda.min
+
+# Perform ridge regression using glmnet with the optimal lambda
+ridge_model <- glmnet(X_standardized, y, alpha = 0, lambda = optimal_lambda)
+
+# Extract coefficients for the optimal lambda
+ridge_coefficients_optimal <- coef(ridge_model)
+
+# Display the coefficients for the optimal lambda
+print(ridge_coefficients_optimal)
+plot(cv_ridge_model)
+```
+```{r}
+response_variable <- "calories"
+
+# Extract predictor variables and response variable from the test data
+test_data <- test_data[, !colnames(test_data) %in% c("age_squared", "weight_squared")]
+X_test <- as.matrix(test_data[, -which(colnames(test_data) %in% response_variable)])
+y_test <- test_data[[response_variable]]
+
+# Standardize the predictor variables using the mean and standard deviation from the training set
+X_test_standardized <- scale(X_test, center = attr(X_standardized, "scaled:center"), scale = attr(X_standardized, "scaled:scale"))
+
+# Make predictions on the test set
+predictions <- predict(ridge_model, newx = X_test_standardized, s = optimal_lambda)
+
+# Evaluate the performance of the model (e.g., using Mean Squared Error)
+mse <- mean((predictions - y_test)^2)
+print(mse)
+```
+**Observation:** Ridge regression introduces a regularization term, often denoted as λ (lambda), which is multiplied by the sum of the squared values of the coefficients. This regularization term, penalizes large coefficients and has a shrinking effect on the coefficients. As a result, it helps prevent overfitting by discouraging the model from fitting the noise in the training data.
+
+The intercept represents the estimated response when all predictor variables are zero. For instance, for the variable 'age', the coefficient is -0.39 which means that for each one-unit increase in age, the estimated calories decrease by approximately 0.39 units, holding other variables constant.
+
+After standardizing the variables (since Ridge regression penalizes the sum of squared coefficients, and having variables on different scales could lead to a situation where the penalty is dominated by variables with larger scales), we find the test MSE. However, the test MSE is very large (628.9871) indicating a poor fit of the model. 
+
+## The Lasso
+
+```{r}
+response_variable <- "calories"
+
+# Extract predictor variables and response variable from the training data
+train_data <- train_data[, !colnames(train_data) %in% c("age_squared", "weight_squared")]
+X <- as.matrix(train_data[, -which(colnames(train_data) %in% response_variable)])
+y <- train_data[[response_variable]]
+
+# Reuse the standardized predictor variables from the ridge regression
+X_standardized <- scale(X)
+
+# Perform cross-validated Lasso regression
+cv_lasso_model <- cv.glmnet(X_standardized, y, alpha = 1)  # Use alpha = 1 for Lasso
+
+lasso_coefficients <- coef(cv_lasso_model)
+
+print(lasso_coefficients)
+
+# Plot the coefficient paths for different values of lambda
+plot(cv_lasso_model)
+```
+```{r}
+# Extract predictor variables and response variable from the test data
+test_data <- test_data[, !colnames(test_data) %in% c("age_squared", "weight_squared")]
+X_test <- as.matrix(test_data[, -which(colnames(test_data) %in% response_variable)])
+y_test <- test_data[[response_variable]]
+
+# Standardize the predictor variables using the mean and standard deviation from the training set
+X_test_standardized <- scale(X_test, center = attr(X_standardized, "scaled:center"), scale = attr(X_standardized, "scaled:scale"))
+
+# Make predictions on the test set
+predictions <- predict(cv_lasso_model, newx = X_test_standardized, s = "lambda.min")  # "lambda.min" for the optimal lambda
+
+# Evaluate the performance of the model (e.g., using Mean Squared Error)
+mse <- mean((predictions - y_test)^2)
+print(mse)
+```
+**Observation:** The Lasso induces sparsity in the model by forcing some coefficients to become exactly zero. Here, the coefficients for age, height, weight, heart_rate, resting_heart, and steps_times_distance have been set to zero. However, the MSE is equal to 626.2061 which is very high.
+
+## SVM
+```{r}
+
+# Specify the response variable
+response_variable <- "calories"
+
+# Create a formula for the models
+formula <- as.formula(paste(response_variable, "~ ."))
+
+# Set up training control for cross-validation
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Train Support Vector Machine (SVM) with Linear Kernel using cross-validation
+svm_linear_model_cv <- train(formula, data = train_data, method = "svmLinear", trControl = ctrl)
+
+# Print the summary of the cross-validated SVM with Linear Kernel model
+print(svm_linear_model_cv)
+
+# Make predictions on the test data using the cross-validated SVM with Linear Kernel model
+predictions_svm_linear_cv <- predict(svm_linear_model_cv, test_data)
+
+# Calculate Mean Squared Error (MSE) for SVM with Linear Kernel
+mse_svm_linear_cv <- mean((test_data$calories - predictions_svm_linear_cv)^2)
+print(paste("SVM with Linear Kernel - Mean Squared Error on Test Set (Cross-Validated):", mse_svm_linear_cv))
+
+# Train Support Vector Machine (SVM) with Radial Kernel using cross-validation
+svm_radial_model_cv <- train(formula, data = train_data, method = "svmRadial", trControl = ctrl)
+
+# Print the summary of the cross-validated SVM with Radial Kernel model
+print(svm_radial_model_cv)
+
+# Make predictions on the test data using the cross-validated SVM with Radial Kernel model
+predictions_svm_radial_cv <- predict(svm_radial_model_cv, test_data)
+
+# Calculate Mean Squared Error (MSE) for SVM with Radial Kernel
+mse_svm_radial_cv <- mean((test_data$calories - predictions_svm_radial_cv)^2)
+print(paste("SVM with Radial Kernel - Mean Squared Error on Test Set (Cross-Validated):", mse_svm_radial_cv))
+
+
+```
+
+
+**Observation:**
+SVM regression performed poorly with MSE for linear and radial models having MSE value as 727.427 and 487.949. Here Radial model has performed better in comparison to ridge and lasso, but still this wouldn't be a sufficient model to produce good results with SVM
+
+## Random Forests 
+
+```{r}
+
+#install.packages("caret")
+
+# Specify the response variable
+response_variable <- "calories"
+
+# Create a formula for the random forest model
+formula <- as.formula(paste(response_variable, "~ ."))
+
+# Set up training control for cross-validation
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Train the random forest model using cross-validation
+rf_model_cv <- train(formula, data = train_data, method = "rf", trControl = ctrl)
+
+# Print the summary of the cross-validated model
+print(rf_model_cv)
+plot(rf_model_cv)
+
+# Make predictions on the test data using the cross-validated model
+predictions_cv <- predict(rf_model_cv, test_data)
+
+# Calculate Mean Squared Error (MSE) or any other evaluation metric if needed
+mse_cv <- mean((test_data$calories - predictions_cv)^2)
+print(paste("Mean Squared Error on Test Set (Cross-Validated):", mse_cv))
+
+```
+**Observation:** In the 5 folds, 3507, 3508, 3506, 3508, 3507 samples were used respectively. The model was tuned over different values of the mtry parameter (number of variables randomly sampled as candidates at each split in a decision tree). Three different values of mtry were tested 2, 6, and 10 out of which 6 was the optimal value. The MSE is 200.96841. 
+
+## Gradient Boosting
+
+
+```{r}
+
+
+# Specify the response variable
+response_variable <- "calories"
+
+# Create a formula for the gradient boosting model
+formula <- as.formula(paste(response_variable, "~ ."))
+
+# Set up training control for cross-validation
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Specify the tuning grid
+tuning_grid <- expand.grid(
+  n.trees = seq(100, 1000, by = 100),
+  interaction.depth = seq(2, 10, by = 2),
+  shrinkage = c(0.001, 0.01, 0.1),
+  n.minobsinnode = c(5, 10, 20)
+)
+
+# Train the gradient boosting model using cross-validation
+gbm_model_cv <- train(
+  formula,
+  data = train_data,
+  method = "gbm",
+  trControl = ctrl,
+  tuneGrid = tuning_grid,
+  verbose = FALSE
+)
+
+# Print the summary of the cross-validated model
+print(gbm_model_cv)
+
+# Make predictions on the test data using the cross-validated model
+predictions_cv <- predict(gbm_model_cv, newdata = test_data, n.trees = gbm_model_cv$bestTune$n.trees)
+
+# Calculate Mean Squared Error (MSE) or other evaluation metrics if needed
+mse_cv <- mean((test_data$calories - predictions_cv)^2)
+print(paste("Mean Squared Error on Test Set (Cross-Validated):", mse_cv))
+```
+**Observation** :
+Test MSE of 233.56 which is still a poor performance for calorie prediction.
+From the EDA, three of the activities had large amount of outliers. So we have dropped those activity rows and performed regression analysis (Separate markdown file) to see if that would benefit having better accuracy in calorie prediction.
+
+Inferences and comparisons of all models are added in the Project report.
+
+# 2. Classification
+
+```{r}
+### cleaning the data
+columns_to_drop <- c("X1", "X", "device", "entropy_heart", "entropy_setps", "corr_heart_steps", "norm_heart", "sd_norm_heart")
+aw_fb_data_class <- aw_fb_data[, !(names(aw_fb_data) %in% columns_to_drop)]
+
+colnames(aw_fb_data_class)[colnames(aw_fb_data_class) == "hear_rate"] <- "heart_rate"
+
+index <- createDataPartition(aw_fb_data_class$activity, p = 0.8, list = FALSE)
+aw_fb_data_class <- aw_fb_data_class[index, ] 
+test_data <- aw_fb_data_class[-index, ]  # Hold-out test set
+
+head(aw_fb_data_class)
+
+```
+## Logistic Regression
+
+```{r}
+
+# Convert the "activity" variable to a factor with custom levels
+aw_fb_data_class$activity <- factor(aw_fb_data_class$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+test_data$activity <- factor(test_data$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+
+# Define the control parameters for cross-validation
+ctrl <- trainControl(method = "cv",  # Cross-validation method
+                     number = 5)     # Number of folds (you can change this number)
+
+# Fit a multinomial logistic regression model using k-fold cross-validation
+multinom_model <- train(activity ~ age + gender + height + weight + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance, 
+                        data = aw_fb_data_class, 
+                        method = "multinom", 
+                        trControl = ctrl)
+
+# Get cross-validated accuracy
+cv_accuracy <- multinom_model$results$Accuracy[1]  # Extract cross-validated accuracy
+print(paste("Cross-Validated Accuracy:", cv_accuracy))
+
+# Get predictions on the test set for each fold
+predictions <- predict(multinom_model, newdata = test_data)
+
+# Calculate accuracy using confusionMatrix function
+accuracy <- confusionMatrix(predictions, test_data$activity)$overall['Accuracy']
+print(paste("Accuracy on Test Set:", accuracy))
+
+# Print Confusion Matrix
+confusion_matrix <- confusionMatrix(predictions, test_data$activity)
+print(confusion_matrix)
+
+
+```
+**Observation:** Accuracy from cross-validation is approximately 26.88 %, indicating the average squared difference between predicted values and actual values on the test set. This signifies the model's predictive accuracy, with lower values suggesting better performance. 
+
+The accuracy on the test set is approximately 24.77 %. This means that the model correctly predicted the activity roughly 24.77% of the time, which indicates the proportion of correct predictions made by the model among all predictions on the test set. There might be complexities in the data that the model hasn't fully captured or other factors impacting prediction quality.
+
+## Naive Bayes
+
+```{r}
+
+
+# Convert the "activity" variable to a factor with custom levels
+aw_fb_data_class$activity <- factor(aw_fb_data_class$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+test_data$activity <- factor(test_data$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+
+# Perform k-fold cross-validation
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+nb_model_cv <- train(activity ~ age + gender + height + weight + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance,
+                     data = aw_fb_data_class,
+                     method = "naive_bayes",
+                     trControl = ctrl)
+
+# Get cross-validated accuracy
+cv_accuracy <- nb_model_cv$results$Accuracy[1]  # Extract cross-validated accuracy
+print(paste("Cross-Validated Accuracy:", cv_accuracy))
+
+# Get predictions on the test set from the cross-validated model
+predictions <- predict(nb_model_cv, newdata = test_data)
+
+# Calculate accuracy
+accuracy <- mean(predictions == test_data$activity)
+print(paste("Accuracy on Test Set:", accuracy))
+
+# Print Confusion Matrix
+confusion_matrix <- confusionMatrix(predictions, test_data$activity)
+print(confusion_matrix)
+
+```
+**Observation:** Cross validated accuracy = 28.12%
+                Accuracy on test set = 33.13%
+
+## KNN
+
+```{r}
+library(reshape2)
+library(ggplot2)
+
+# Initialize empty vectors to store accuracies
+k_values <- 1:10
+test_accuracies <- rep(NA, 10)
+cv_accuracies <- rep(NA, 10)
+confusion_matrices <- list()
+
+# Loop through different k values and compute accuracies and confusion matrices
+for (k in k_values) {
+  ctrl <- trainControl(method = "cv", number = 5)
+  knn_model_cv <- train(activity ~ age + gender + height + weight + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance,
+                        data = aw_fb_data_class,
+                        method = "knn",
+                        trControl = ctrl,
+                        tuneGrid = data.frame(k = k))
+  
+  predictions <- predict(knn_model_cv, newdata = test_data)
+  
+  cv_accuracy <- knn_model_cv$results$Accuracy[1]
+  cv_accuracies[k] <- cv_accuracy
+  
+  accuracy <- mean(predictions == test_data$activity)
+  test_accuracies[k] <- accuracy
+  
+  confusion_matrices[[as.character(k)]] <- confusionMatrix(data = factor(predictions, levels = levels(test_data$activity)),
+                                                           reference = factor(test_data$activity, levels = levels(test_data$activity)))
+}
+
+# Create a data frame with k values and accuracies
+accuracy_df <- data.frame(k_values, test_accuracies, cv_accuracies)
+
+# Melt the data for plotting
+accuracy_melted <- melt(accuracy_df, id.vars = "k_values", variable.name = "Accuracy_Type", value.name = "Accuracy")
+
+# Plot the accuracies
+accuracy_plot <- ggplot(accuracy_melted, aes(x = factor(k_values), y = Accuracy, color = Accuracy_Type)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "k values", y = "Accuracy", color = "Accuracy Type") +
+  ggtitle("Test Accuracy and Cross-Validated Accuracy for different k values in KNN") +
+  theme_minimal()
+
+# Display confusion matrices for each k value
+for (i in seq_along(k_values)) {
+  print(paste("Confusion Matrix for k =", k_values[i]))
+  print(as.matrix(confusion_matrices[[as.character(k_values[i])]]$table))
+  print("----------------------------")
+}
+
+# Display the plot
+print(accuracy_plot)
+
+# Create a data frame with k values, test accuracies, and cross-validated accuracies
+accuracy_table <- data.frame(K = k_values, CV_Accuracy = cv_accuracies, Test_Accuracy = test_accuracies)
+
+# Print the table
+print(accuracy_table)
+
+
+```
+
+
+**Observation:** For k values 1,2 and 3 have higher accuracies, one could prefer to have k values as less as possible but it could lead to overfitting and the unseen dataset if used it might not perform well. Here test split would have had similar pattern from the train set but if we switch devices and provide that data it might not perform well due to overfitting. So considering other K values 4 and 5 gives a better output overall and comparatively the accuracies or same level from KNN = 4 to 7. So somewhere between these 4 to 7 would generalize the model better and perform well in this case as we can from PCA it was evident the data obtained  from smart wearbles are indeed non linear and have complex structure in reduced dimensions.
+
+## SVM
+
+```{r}
+
+# Convert the "activity" variable to a factor with custom levels
+aw_fb_data_class$activity <- factor(aw_fb_data_class$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+test_data$activity <- factor(test_data$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+
+# Perform k-fold cross-validation for radial SVM
+svm_model_radial <- train(activity ~ ., data = aw_fb_data_class,
+                          method = "svmRadial",
+                          trControl = trainControl(method = "cv", number = 5),
+                          preProcess = c("center", "scale"))
+
+# Print radial SVM results
+print("SVM Radial Kernel - Cross-validation results:")
+print(svm_model_radial)
+
+# Perform k-fold cross-validation for linear SVM
+svm_model_linear <- train(activity ~ ., data = aw_fb_data_class,
+                          method = "svmLinear",
+                          trControl = trainControl(method = "cv", number = 5),
+                          preProcess = c("center", "scale"))
+
+# Print linear SVM results
+print("SVM Linear Kernel - Cross-validation results:")
+print(svm_model_linear)
+
+ # Predict on test data using the trained models
+predictions_radial <- predict(svm_model_radial, newdata = test_data)
+predictions_linear <- predict(svm_model_linear, newdata = test_data)
+
+# Calculate accuracy for radial SVM
+accuracy_radial <- confusionMatrix(predictions_radial, test_data$activity)$overall['Accuracy']
+cat("SVM Radial Kernel - Accuracy on Test Data:", accuracy_radial, "\n")
+
+# Calculate accuracy for linear SVM
+accuracy_linear <- confusionMatrix(predictions_linear, test_data$activity)$overall['Accuracy']
+cat("SVM Linear Kernel - Accuracy on Test Data:", accuracy_linear, "\n")
+```
+**Observation:** SVM model with linear and radial kernel didn't perform well with classification with atmost accuracy of ~44.57% for radial and ~29.25% for linear SVM models.
+
+
+## Random forest with multiple trees :
+
+```{r}
+# Assuming 'aw_fb_data_class' contains your dataset
+
+# Convert 'activity' column to factor (if not already)
+aw_fb_data_class$activity <- factor(aw_fb_data_class$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+test_data$activity <- factor(test_data$activity, levels = c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting'))
+
+# Define an array of numbers of trees to test
+num_trees_array <- c(15, 20, 25, 35, 40, 50, 75)
+
+# Create empty matrices to store accuracies for each class and overall accuracy
+class_accuracies <- matrix(0, nrow = length(num_trees_array), ncol = 6)  # 6 classes
+overall_accuracies <- numeric(length(num_trees_array))
+
+# Perform analysis for each number of trees
+for (i in 1:length(num_trees_array)) {
+  num_trees <- num_trees_array[i]
+  
+  # Fit a random forest model on the full dataset
+  rf_model <- randomForest(activity ~ age + gender + height + weight + steps + heart_rate + distance + resting_heart + intensity_karvonen + steps_times_distance, 
+                           data = aw_fb_data_class, 
+                           ntree = num_trees,
+                           keep.forest = TRUE)
+  
+  # Use the trained Random Forest model to make predictions on the test dataset
+  test_predictions <- predict(rf_model, newdata = test_data)
+  
+  # Calculate overall accuracy
+  overall_accuracy <- mean(test_predictions == test_data$activity)
+  overall_accuracies[i] <- overall_accuracy
+  
+  # Create confusion matrix to calculate class-wise accuracies
+  confusion_mat <- table(test_predictions, test_data$activity)
+  class_accuracy <- diag(confusion_mat) / rowSums(confusion_mat)
+  class_accuracies[i, ] <- ifelse(is.na(class_accuracy), 0, class_accuracy)
+}
+
+# Plotting overall accuracy for each number of trees
+plot(num_trees_array, overall_accuracies, type = 'b', 
+     xlab = "Number of Trees", ylab = "Overall Accuracy",
+     main = "Random Forest Overall Accuracy vs. Number of Trees")
+
+# Plotting class-wise accuracy for each class and each number of trees
+par(mfrow = c(2, 3))  # Setting up the layout for multiple plots
+classes <- c('Lying', 'Running 3 METs', 'Running 5 METs', 'Running 7 METs', 'Self Pace walk', 'Sitting')
+for (j in 1:6) {
+  plot(num_trees_array, class_accuracies[, j], type = 'b', 
+       xlab = "Number of Trees", ylab = paste("Accuracy for", classes[j]),
+       main = paste("Random Forest Accuracy for", classes[j], "vs. Number of Trees"))
+}
+
+for (i in 1:length(num_trees_array)) {
+  cat("Number of Trees:", num_trees_array[i], "\tOverall Accuracy:", overall_accuracies[i], "\n")
+}
+
+```
+
+
+The output of random forest is highly varied due to its random selection of predictors at each model training, overall we can see that accuracy of random forest stands out compared to other models for classification, this is due to the fact that random forest are good at gaining about the relationship about the non linearity in the dataset and also to understand complex structure of the feature space which is evident for us from the PCA analysis.
+
+With many number of results produced , random forest with number of trees between 20 to 50 is sufficient to produce accuracy of about 97% -99% and with overall stablity between classwise and overall classification accuracy highest for trees with values 25 to 40.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
