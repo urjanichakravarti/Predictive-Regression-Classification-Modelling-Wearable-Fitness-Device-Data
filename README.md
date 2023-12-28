@@ -16,7 +16,8 @@ with an accuracy rate of 98%.
    ```
 
 2. Install packages
-This code was build built under R version 4.3.2
+* This code was build built under R version 4.3.2
+  
   ```sh
   install.packages("ggplot2")
   install.packages("tidyr")
